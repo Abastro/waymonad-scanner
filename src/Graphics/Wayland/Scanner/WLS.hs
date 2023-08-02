@@ -2,8 +2,7 @@
 
 module Graphics.Wayland.Scanner.WLS (
   ObjectInfo (..),
-  Scanner (..),
-  Scan,
+  Scan(..),
   ScannerEnv (..),
   getObjectConvert,
   scannerIO,
@@ -31,19 +30,17 @@ newtype ScannerEnv = ScannerEnv
   { scannerObjectMap :: ObjectMap
   }
 
-newtype Scanner m a = Scanner (ReaderT ScannerEnv m a)
+newtype Scan a = Scan (ReaderT ScannerEnv TH.Q a)
   deriving (Functor, Applicative, Monad, MonadReader ScannerEnv, MonadFail)
 
-instance (Monad m, TH.Quote m) => TH.Quote (Scanner m) where
-  newName :: (Monad m, TH.Quote m) => String -> Scanner m TH.Name
-  newName name = Scanner . lift $ TH.newName name
+instance TH.Quote Scan where
+  newName :: String -> Scan TH.Name
+  newName name = Scan . lift $ TH.newName name
 
-type Scan = Scanner TH.Q
-
-getObjectMap :: (Monad m) => Scanner m ObjectMap
+getObjectMap :: Scan ObjectMap
 getObjectMap = asks $ \env -> env.scannerObjectMap
 
-getObjectConvert :: (Monad m) => String -> Scanner m ObjectInfo
+getObjectConvert :: String -> Scan ObjectInfo
 getObjectConvert name = do
   oMap <- getObjectMap
   maybe (undefined defObject) pure (M.lookup name oMap)
@@ -55,8 +52,8 @@ getObjectConvert name = do
     constPureE <- [e|const pure|]
     pure (resourceType, pureE, constPureE)
 
-scannerIO :: IO a -> Scanner TH.Q a
-scannerIO = Scanner . lift . TH.runIO
+scannerIO :: IO a -> Scan a
+scannerIO = Scan . lift . TH.runIO
 
-runScanner :: Scanner m a -> ScannerEnv -> m a
-runScanner (Scanner act) = runReaderT act
+runScanner :: Scan a -> ScannerEnv -> TH.Q a
+runScanner (Scan act) = runReaderT act

@@ -21,6 +21,8 @@ import Language.Haskell.TH.Syntax qualified as THS
 import Data.Bifunctor
 
 -- Where, and how, can you use this..
+-- I guess this does not make sense because it was.. not tested. Meh
+
 makeInterfaceGetter :: String -> Scan TH.Dec
 makeInterfaceGetter iface = TH.forImpD TH.CCall TH.Safe ('&' : ifaceName) funName importType
  where
@@ -43,7 +45,7 @@ protocolFromFile :: String -> Scan [TH.Dec]
 protocolFromFile file = do
   Protocol _ ifaces <- scannerIO $ protFromFile file
   ret <- mapM makeInterfaceDecls ifaces
-  Scanner . lift $ generateInterface file
+  Scan . lift $ generateInterface file
   pure $ concat ret
 
 generateInterface :: String -> TH.Q ()
