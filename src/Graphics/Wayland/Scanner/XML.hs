@@ -29,24 +29,24 @@ argFromElem el = case elName el == QName "arg" Nothing Nothing of
         aType = argTypeFromXml el
      in Just (name, aType)
 
-eventsFromElem :: Element -> [(String, WlEvent)]
+eventsFromElem :: Element -> [(String, Event)]
 eventsFromElem el =
   let getReq el' = case elName el' == QName "event" Nothing Nothing of
         False -> Nothing
         True ->
           let name = fromMaybe (error "Can't find request name") $ findAttr (QName "name" Nothing Nothing) el'
               args = mapMaybe argFromElem $ elChildren el'
-           in Just (name, WlEvent args)
+           in Just (name, Event args)
    in mapMaybe getReq $ elChildren el
 
-requestsFromElem :: Element -> [(String, WlRequest)]
+requestsFromElem :: Element -> [(String, Request)]
 requestsFromElem el =
   let getReq el' = case elName el' == QName "request" Nothing Nothing of
         False -> Nothing
         True ->
           let name = fromMaybe (error "Can't find request name") $ findAttr (QName "name" Nothing Nothing) el'
               args = mapMaybe argFromElem $ elChildren el'
-           in Just (name, WlRequest args)
+           in Just (name, Request args)
    in mapMaybe getReq $ elChildren el
 
 interfaceFromElem :: Element -> Maybe (String, Interface, Int)
@@ -57,19 +57,19 @@ interfaceFromElem el = case elName el == QName "interface" Nothing Nothing of
         version = fromMaybe (error "Can't find interface version") $ findAttr (QName "version" Nothing Nothing) el
      in Just (name, Interface [] (requestsFromElem el) (eventsFromElem el), read version)
 
-protFromElem :: Element -> WlProtocol
+protFromElem :: Element -> Protocol
 protFromElem el =
   let name = fromMaybe (error "Can't find protocol name") $ findAttr (QName "name" Nothing Nothing) el
       elems = mapMaybe interfaceFromElem $ elChildren el
-   in WlProtocol name elems
+   in Protocol name elems
 
-parseProtocol :: (XmlSource s) => s -> WlProtocol
+parseProtocol :: (XmlSource s) => s -> Protocol
 parseProtocol src =
   protFromElem $
     fromMaybe (error "Failed to parse XML document") $
       parseXMLDoc src
 
-protFromFile :: String -> IO WlProtocol
+protFromFile :: String -> IO Protocol
 protFromFile file = do
   content <- readFile file
   pure $ parseProtocol content

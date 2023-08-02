@@ -34,7 +34,10 @@ newtype ScannerEnv = ScannerEnv
 newtype Scanner m a = Scanner (ReaderT ScannerEnv m a)
   deriving (Functor, Applicative, Monad, MonadReader ScannerEnv, MonadFail)
 
-instance (Monad m) => TH.Quote (Scanner m)
+instance (Monad m, TH.Quote m) => TH.Quote (Scanner m) where
+  newName :: (Monad m, TH.Quote m) => String -> Scanner m TH.Name
+  newName name = Scanner . lift $ TH.newName name
+
 type Scan = Scanner TH.Q
 
 getObjectMap :: (Monad m) => Scanner m ObjectMap

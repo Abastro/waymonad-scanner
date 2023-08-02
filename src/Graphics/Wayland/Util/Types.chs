@@ -1,9 +1,9 @@
 module Graphics.Wayland.Util.Types (
   Message(..),
   Interface(..),
-  WlArray(..), WlArrayPtr, unArray,
+  WlArray(..), WlArrayPtr,
   WlFixed,
-  Argument(..), ArgumentPtr,
+  Argument(..), ArgumentPtr, ptrToArgument, argumentToPtr, wordToArgument, argumentToWord,
   Dispatcher, withDispatcher,
 )
 where
@@ -22,8 +22,6 @@ import Foreign.C.Types
 -- | Named as WlArray to avoid name collision.
 newtype WlArray = WlArray BS.ByteString
 {# pointer *array as WlArrayPtr -> WlArray #}
-unArray :: WlArray -> BS.ByteString
-unArray (WlArray bs) = bs
 
 instance Storable WlArray where
   sizeOf _ = {# sizeof array #}
@@ -39,7 +37,6 @@ instance Storable WlArray where
 
 data WlFixed
 
-
 -- | Data to feed wl_resource_post_event_array.
 --
 -- Argument data itself could be an integer, and it lags the tag.
@@ -52,6 +49,18 @@ instance Storable Argument where
   alignment _ = {# alignof argument #}
   peek argPtr = Argument <$> peek (castPtr argPtr)
   poke argPtr (Argument arg) = poke (castPtr argPtr) arg
+
+ptrToArgument :: Ptr a -> Argument
+ptrToArgument ptr = Argument (ptrToWordPtr ptr)
+
+argumentToPtr :: Argument -> Ptr a
+argumentToPtr (Argument arg) = wordPtrToPtr arg
+
+wordToArgument :: Word -> Argument
+wordToArgument num = Argument (fromIntegral num)
+
+argumentToWord :: Argument ->  Word
+argumentToWord (Argument arg) = fromIntegral arg
 
 -- |
 -- Dispatcher function type alias

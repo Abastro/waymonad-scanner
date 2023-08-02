@@ -30,6 +30,8 @@ withDestroyCallback func act = do
   fnPtr <- makeDestroyCallback func
   act fnPtr
 
+-- Problem: The following doc is inconsistent with new_id being uint32_t.
+
 -- |
 -- Post an event to the client's object referred to by 'resource'.
 -- 'opcode' is the event number generated from the protocol XML

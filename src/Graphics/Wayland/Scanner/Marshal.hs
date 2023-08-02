@@ -2,9 +2,9 @@
 {-# LANGUAGE TemplateHaskellQuotes #-}
 
 module Graphics.Wayland.Scanner.Marshal (
+  postEventFnDec,
   makeMarshaller,
   takerType,
-  makePostFun,
 ) where
 
 import Control.Monad
@@ -20,9 +20,10 @@ import System.Posix.Types (Fd)
 
 import Graphics.Wayland.Scanner.Types
 import Graphics.Wayland.Scanner.WLS
-import Graphics.Wayland.Server.Resource (Resource, resourceGetClient)
-import Graphics.Wayland.Util.Types (WlArgument, WlArray (..), unArray)
+import Graphics.Wayland.Server.Resource
+import Graphics.Wayland.Util.Types
 
+import Data.Bifunctor
 import Language.Haskell.TH qualified as TH
 
 -- ? Try typed template haskell
@@ -47,21 +48,7 @@ argTypeToExp = \case
 decodePattern :: (Monad m) => ArgumentType -> TH.Name -> Scanner m TH.PatQ
 decodePattern arg name = fmap (TH.SigP (TH.VarP name)) <$> argTypeToExp arg
 
-withStringArg :: Ptr CString -> Maybe T.Text -> IO () -> IO ()
-withStringArg ptr Nothing act = poke ptr nullPtr >> act
-withStringArg ptr (Just txt) act =
-  BS.useAsCString (E.encodeUtf8 txt) $ \cStr -> do
-    poke ptr cStr
-    act
-
-withArrayArg :: Ptr (Ptr WlArray) -> Maybe BS.ByteString -> IO () -> IO ()
-withArrayArg ptr Nothing act = poke ptr nullPtr >> act
-withArrayArg ptr (Just array) act = with (WlArray array) $ \aPtr -> do
-  poke ptr aPtr
-  act
-
--- | Generates:
--- Writes given value to the argument pointer, and run the parameter action.
+{-
 argTypeToDemarshalExp :: (Monad m) => ArgumentType -> TH.ExpQ -> TH.ExpQ -> TH.ExpQ -> Scanner m TH.ExpQ
 argTypeToDemarshalExp FixedArg _ _ _ = error "Can't encode fixed point values yet"
 argTypeToDemarshalExp (StringArg canNull) _ p e = pure [e|withStringArg $p (Just $e)|]
@@ -74,11 +61,11 @@ argTypeToDemarshalExp (ObjectArg canNull str) t p e = do
     [e|
       \act -> do
         theClient <- resourceGetClient $t
-        resourcePtr <- $(pure convert) theClient $e
-        poke $p resourcePtr
+        argResPtr <- $(pure convert) theClient $e
+        poke $p argResPtr
         act
       |]
-{- argTypeToDemarshalExp (NullableObjectArg str) _ p e = do
+argTypeToDemarshalExp (NullableObjectArg str) _ p e = do
   convert <- (\(_, _, v) -> v) <$> getObjectConvert str
   let rpName = TH.mkName "resourcePtr"
       unMaybe = TH.AppE (TH.VarE 'fromMaybe) (TH.VarE 'nullPtr)
@@ -87,95 +74,130 @@ argTypeToDemarshalExp (ObjectArg canNull str) t p e = do
       [ TH.BindS (TH.VarP rpName) $ TH.AppE (TH.AppE (TH.VarE 'traverse) convert) e,
         TH.NoBindS $ TH.AppE (TH.VarE '(>>)) (TH.AppE (TH.AppE (TH.VarE 'poke) p) (TH.AppE unMaybe $ TH.VarE rpName))
       ]
-      -}
 argTypeToDemarshalExp _ _ p e = pure [e|(>>) (poke $p $e)|]
+-}
 
-foreign import ccall "wl_resource_post_event_array" c_post :: Ptr Resource -> Word32 -> Ptr WlArgument -> IO ()
+-- | Types which support the conversion to Argument.
+class AsArgument t where
+  withArg :: t -> (Argument -> IO a) -> IO a
 
-doActionsExp :: (TH.Quote mo, Monad mi) => [TH.Code mo (mi ())] -> TH.Code mo (mi ())
-doActionsExp exprs =
-  TH.unsafeCodeCoerce $ TH.doE (TH.noBindS . TH.unTypeCode <$> exprs)
+instance AsArgument T.Text where
+  withArg :: T.Text -> (Argument -> IO a) -> IO a
+  withArg txt act = BS.useAsCString (E.encodeUtf8 txt) (act . ptrToArgument)
 
-knownLambda :: (TH.Quote mo) => TH.Name -> TH.Code mo a -> TH.Code mo (r -> a)
-knownLambda bindName expr =
-  TH.unsafeCodeCoerce $ TH.lamE [TH.varP bindName] (TH.unTypeCode expr)
+instance AsArgument WlArray where
+  withArg :: WlArray -> (Argument -> IO a) -> IO a
+  withArg array act = with array (act . ptrToArgument)
 
-pokeStringArg :: Int -> Ptr CString -> Maybe T.Text -> ContT () IO ()
-pokeStringArg offset ptr = \case
-  Nothing -> lift $ pokeByteOff ptr offset nullPtr
-  Just txt -> do
-    cStr <- ContT $ BS.useAsCString (E.encodeUtf8 txt)
-    lift $ pokeByteOff ptr offset cStr
+instance AsArgument Word32 where
+  withArg :: Word32 -> (Argument -> IO a) -> IO a
+  withArg num act = act $ wordToArgument (fromIntegral num)
 
--- Can be casted from 'Ptr WlArgument', and all its alignment is of pointer-size.
-pokeArrayArg :: Int -> Ptr (Ptr WlArray) -> Maybe BS.ByteString -> ContT () IO ()
-pokeArrayArg offset ptr = \case
-  Nothing -> lift $ pokeByteOff ptr offset nullPtr
-  Just array -> do
-    aPtr <- ContT $ with (WlArray array)
-    lift $ pokeByteOff ptr offset aPtr -- Just poking bytes
+instance AsArgument Int32 where
+  withArg :: Int32 -> (Argument -> IO a) -> IO a
+  withArg num act = act $ wordToArgument (fromIntegral num)
 
-instance Storable WlArgument
+instance AsArgument Fd where
+  withArg :: Fd -> (Argument -> IO a) -> IO a
+  withArg fd act = act $ wordToArgument (fromIntegral fd)
+
+instance (AsArgument t) => AsArgument (Maybe t) where
+  withArg :: (AsArgument t) => Maybe t -> (Argument -> IO a) -> IO a
+  withArg = \case
+    Just val -> withArg val
+    Nothing -> \act -> act $ ptrToArgument nullPtr
+
+withArgCont :: (AsArgument t) => t -> ContT r IO Argument
+withArgCont arg = ContT (withArg arg)
+
+argTypeOf :: ArgumentType -> Scan TH.Type
+argTypeOf = \case
+  IntArg -> [t|Int32|]
+  UIntArg -> [t|Word32|]
+  FixedArg -> error "not supported"
+  StringArg canNull -> applyNullable canNull [t|Maybe T.Text|]
+  ObjectArg canNull objName -> applyNullable canNull (getType objName)
+  NewIdArg canNull _ -> applyNullable canNull [t|Word32|]
+  ArrayArg canNull -> applyNullable canNull [t|WlArray|]
+  FdArg -> [t|Fd|]
+ where
+  getType objName = (\info -> info.objType) <$> getObjectConvert objName
+  applyNullable = \case
+    NonNull -> id
+    Nullable -> \typ -> [t|Maybe $typ|]
+
+-- | Gives the type {Arguments} -> IO ().
+argsToIOType :: [ArgumentType] -> Scan TH.Type
+argsToIOType argTyps =
+  foldr (\l r -> [t|$l -> $r|]) [t|IO ()|] $ argTypeOf <$> argTyps
+
+demarshallArgExp :: Scan TH.Exp -> Scan TH.Exp -> ArgumentType -> TH.Code Scan (ContT () IO Argument)
+demarshallArgExp client arg = \case
+  -- Relies on the fact that fromIntegral preserves the bits.
+  IntArg -> [||withArgCont @Int32 $$(TH.unsafeCodeCoerce arg)||]
+  UIntArg -> [||withArgCont @Word32 $$(TH.unsafeCodeCoerce arg)||]
+  FixedArg -> error "not supported"
+  StringArg NonNull -> [||withArgCont @T.Text $$(TH.unsafeCodeCoerce arg)||]
+  StringArg Nullable -> [||withArgCont @(Maybe T.Text) $$(TH.unsafeCodeCoerce arg)||]
+  -- TODO Nullable ctrl
+  ObjectArg _ objName -> TH.bindCode ((\info -> info.objConvert1) <$> getObjectConvert objName) $
+    \convert ->
+      [||
+      lift $ $$(TH.unsafeCodeCoerce $ pure convert) $$(TH.unsafeCodeCoerce client) $$(TH.unsafeCodeCoerce arg)
+      ||]
+  -- TODO Nullable ctrl
+  NewIdArg _ _ -> [||withArgCont @Word32 $$(TH.unsafeCodeCoerce arg)||]
+  ArrayArg NonNull -> [||withArgCont @WlArray $$(TH.unsafeCodeCoerce arg)||]
+  ArrayArg Nullable -> [||withArgCont @(Maybe WlArray) $$(TH.unsafeCodeCoerce arg)||]
+  FdArg -> [||withArgCont @Fd $$(TH.unsafeCodeCoerce arg)||]
 
 postEventExp ::
-  TH.Code Scan (Ptr Resource) ->
-  [(TH.Name, ArgumentType)] ->
-  Integer ->
+  Scan TH.Exp ->
+  Scan TH.Exp ->
+  [(Scan TH.Exp, ArgumentType)] ->
+  Word32 ->
   TH.Code Scan (IO ())
-postEventExp targetPtr args opcode =
-  [||allocaArray @WlArgument numArgs $ $$withArgsPtr||]
+postEventExp client target args opcode =
+  [||
+  (`runContT` pure) $ do
+    argList <- sequenceA $$demarshalls
+    argsPtr <- ContT (withArray argList)
+    lift $ resourcePostEventArray $$(TH.unsafeCodeCoerce target) opcode argsPtr
+  ||]
  where
-  withArgsPtr = knownLambda argsName [||(`runContT` pure) $ $$(doActionsExp actions)||]
+  demarshalls =
+    TH.unsafeCodeCoerce . TH.listE . fmap TH.unTypeCode $
+      uncurry (demarshallArgExp client) <$> args
 
-  numArgs = length args
-  argsName = TH.mkName "argumentsPtr"
-  argsPtr = TH.unsafeCodeCoerce $ TH.varE argsName -- Was 8 * number
-  opcodeW32 :: Word32 = fromIntegral opcode
-
-  actions :: [TH.Code Scan (ContT () IO ())]
-  actions =
-    zipWith marshallArg [0 ..] args
-      <> pure [||lift $ c_post $$targetPtr opcodeW32 $$argsPtr||]
-
-  marshallArg :: Int -> (TH.Name, ArgumentType) -> TH.Code Scan (ContT () IO ())
-  marshallArg = undefined
-
-makePostClause :: (Monad m) => [ArgumentType] -> Integer -> Scanner m TH.ClauseQ
-makePostClause xs opcode = do
-  exps <- zipWithM deMarshalExps (zip xs [0 ..]) argNames
-  let lam = TH.lamE [TH.varP apName] $ foldr TH.appE act exps
-  pure $ TH.clause (TH.varP rpName : fmap TH.varP argNames) (TH.normalB [e|$callocExp $lam|]) []
+postEventFnDec :: TH.Name -> [ArgumentType] -> Integer -> Scan [TH.Dec]
+postEventFnDec fnName argTypes opcode = do
+  signature <- TH.sigD fnName [t|Resource -> $handleType|]
+  implementation <- TH.funD fnName [TH.clause (TH.varP target : argPatterns) (TH.normalB bodyExpr) []]
+  pure [signature, implementation]
  where
-  apName = TH.mkName "argumentsPtr"
-  rpName = TH.mkName "targetPtr"
-  argNames = take (length xs) $ map (TH.mkName . ("arg" ++) . show) [0 :: Int ..]
-  callocExp = [e|allocaBytes $(TH.litE (TH.IntegerL $ 8 * fromIntegral (length xs)))|]
-  deMarshalExps (arg, i) argName =
-    argTypeToDemarshalExp
-      arg
-      (TH.varE rpName)
-      [e|plusPtr $(TH.varE apName) $(TH.litE . TH.IntegerL $ i * 8)|]
-      (TH.varE argName)
-  act = [e|c_post $(TH.varE rpName) opcode $(TH.varE apName)|]
+  bodyExpr =
+    TH.doE
+      [ TH.bindS (TH.varP client) [e|resourceGetClient $(TH.varE target)|],
+        TH.noBindS $ TH.unTypeCode $ postEventExp (TH.varE client) (TH.varE target) argExps (fromIntegral opcode)
+      ]
+  target = TH.mkName "target"
+  client = TH.mkName "client"
 
-makePostFun :: (Monad m) => TH.Name -> [ArgumentType] -> Integer -> Scanner m [TH.DecQ]
-makePostFun name xs opcode = do
-  clause <- makePostClause xs opcode
-  tType <- takerType xs
-  let funType = [t|Ptr Resource -> $tType|]
-  pure [TH.sigD name funType, TH.funD name [clause]]
+  args = zip (argNameOf <$> [0 :: Int ..]) argTypes
+  argNameOf idx = TH.mkName ("arg" <> show idx)
+  argPatterns = TH.varP . fst <$> args
+  handleType = argsToIOType argTypes
+  argExps = first TH.varE <$> args
 
 peekStringArg :: Ptr CString -> IO T.Text
 peekStringArg ptr = do
   strPtr <- peek ptr
-  bs <- BS.unsafePackCString strPtr
-  pure (E.decodeUtf8 bs)
+  E.decodeUtf8 <$> BS.unsafePackCString strPtr
 
-peekArrayArg :: Ptr (Ptr WlArray) -> IO BS.ByteString
+peekArrayArg :: Ptr (Ptr WlArray) -> IO WlArray
 peekArrayArg ptr = do
   arrayPtr <- peek ptr
-  array <- peek arrayPtr
-  pure (unArray array)
+  peek arrayPtr
 
 argTypeToMarshalExp :: (Monad m) => ArgumentType -> TH.ExpQ -> Scanner m TH.ExpQ
 argTypeToMarshalExp FixedArg _ = error "Can't decode fixed point values yet"
@@ -293,6 +315,14 @@ makeMarshalClause xs = do
 makeMarshaller :: (Monad m) => TH.Name -> [ArgumentType] -> Scanner m [TH.DecQ]
 makeMarshaller name xs = do
   tType <- takerType xs
-  let funType = [t|Ptr WlArgument -> $tType -> IO ()|]
+  let funType = [t|Ptr Argument -> $tType -> IO ()|]
   clause <- makeMarshalClause xs
   pure [TH.sigD name funType, TH.funD name [clause]]
+
+marshallerFnDec :: TH.Name -> [ArgumentType] -> [Scan TH.Dec]
+marshallerFnDec name argTypes =
+  [ TH.sigD name [t|Ptr Argument -> $callbackType -> IO ()|],
+    TH.funD name []
+  ]
+ where
+  callbackType = argsToIOType argTypes

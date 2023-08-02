@@ -1,6 +1,8 @@
 {-# LANGUAGE TemplateHaskellQuotes #-}
 
-module Graphics.Wayland.Scanner
+module Graphics.Wayland.Scanner (
+  protocolFromFile,
+)
 where
 
 import Control.Monad.Trans (MonadTrans (lift))
@@ -17,25 +19,26 @@ import Utility
 import Language.Haskell.TH qualified as TH
 import Language.Haskell.TH.Syntax qualified as THS
 
-makeInterfaceGetter :: String -> TH.Dec
-makeInterfaceGetter iface =
-  let ifaceName = iface ++ "_interface"
-      funName = TH.mkName $ replaceUnder iface ++ "Interface"
-      importType = TH.AppT (TH.ConT ''Ptr) (TH.ConT ''WlInterface)
-   in TH.ForeignD $ TH.ImportF TH.CCall TH.Safe ('&' : ifaceName) funName importType
+makeInterfaceGetter :: String -> Scan TH.Dec
+makeInterfaceGetter iface = TH.forImpD TH.CCall TH.Safe ('&' : ifaceName) funName importType
+ where
+  ifaceName = iface ++ "_interface"
+  funName = TH.mkName $ replaceUnder iface ++ "Interface"
+  importType = [t|Ptr Interface|]
 
-makeInterfaceDecls :: (Monad m, MonadFail m) => (String, Interface, Int) -> Scanner m [TH.Dec]
+makeInterfaceDecls :: (String, Interface, Int) -> Scan [TH.Dec]
 makeInterfaceDecls (name, Interface _ reqs evts, _) = do
+  getterD <- makeInterfaceGetter name
   reqD <-
     if null reqs
       then pure []
-      else makeDispatcher name $ map (\(n, WlRequest x) -> (n, map snd x)) reqs
-  evtD <- mapM (\((n, WlEvent x), i) -> makePostFun (TH.mkName $ replaceUnder name ++ "Post" ++ cleanName n) (map snd x) i) $ zip evts [0 ..]
-  pure $ makeInterfaceGetter name : reqD ++ concat evtD
+      else makeDispatcher name $ map (\(n, Request x) -> (n, map snd x)) reqs
+  evtD <- traverse (\((n, Event x), i) -> postEventFnDec (TH.mkName $ replaceUnder name ++ "Post" ++ cleanName n) (map snd x) i) $ zip evts [0 ..]
+  pure $ getterD : reqD ++ concat evtD
 
-protocolFromFile :: String -> Scanner TH.Q [TH.Dec]
+protocolFromFile :: String -> Scan [TH.Dec]
 protocolFromFile file = do
-  WlProtocol _ ifaces <- scannerIO $ protFromFile file
+  Protocol _ ifaces <- scannerIO $ protFromFile file
   ret <- mapM makeInterfaceDecls ifaces
   Scanner . lift $ generateInterface file
   pure $ concat ret

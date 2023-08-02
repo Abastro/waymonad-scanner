@@ -3,10 +3,10 @@ module Graphics.Wayland.Scanner.Types (
   ArgumentType (..),
   argTypeFromData,
   WlEnum (..),
-  WlRequest (..),
-  WlEvent (..),
+  Request (..),
+  Event (..),
   Interface (..),
-  WlProtocol (..),
+  Protocol (..),
 )
 where
 
@@ -40,9 +40,9 @@ argTypeFromData "fd" _ _ = FdArg
 argTypeFromData x _ _ = error $ "Can't decode " ++ x ++ " as argument type"
 
 newtype WlEnum = WlEnum [(String, Int)]
-newtype WlRequest = WlRequest [(String, ArgumentType)]
-newtype WlEvent = WlEvent [(String, ArgumentType)]
+newtype Request = Request [(String, ArgumentType)]
+newtype Event = Event [(String, ArgumentType)]
 
-data Interface = Interface [(String, WlEnum)] [(String, WlRequest)] [(String, WlEvent)]
+data Interface = Interface [(String, WlEnum)] [(String, Request)] [(String, Event)]
 
-data WlProtocol = WlProtocol String [(String, Interface, Int)]
+data Protocol = Protocol String [(String, Interface, Int)]
