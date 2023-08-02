@@ -18,7 +18,9 @@ import Utility
 
 import Language.Haskell.TH qualified as TH
 import Language.Haskell.TH.Syntax qualified as THS
+import Data.Bifunctor
 
+-- Where, and how, can you use this..
 makeInterfaceGetter :: String -> Scan TH.Dec
 makeInterfaceGetter iface = TH.forImpD TH.CCall TH.Safe ('&' : ifaceName) funName importType
  where
@@ -32,8 +34,9 @@ makeInterfaceDecls (interfaceName, Interface _ reqs evts, _) = do
   reqD <-
     if null reqs
       then pure []
-      else makeDispatcher interfaceName $ map (\(n, Request x) -> (n, map snd x)) reqs
-  evtD <- traverse (\((n, Event x), i) -> postEventFnDec (TH.mkName $ replaceUnder interfaceName ++ "Post" ++ cleanName n) (map snd x) i) $ zip evts [0 ..]
+      else makeDispatcher interfaceName $ second (\(Request args) -> map snd args) <$> reqs
+  evtD <- traverse (\((n, Event args), i) ->
+    postEventFnDec (TH.mkName $ hsVarName interfaceName ++ "Post" ++ cleanName n) (map snd args) i) $ zip evts [0 ..]
   pure $ getterD : reqD ++ concat evtD
 
 protocolFromFile :: String -> Scan [TH.Dec]

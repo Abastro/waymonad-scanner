@@ -6,16 +6,13 @@ module Graphics.Wayland.Scanner.Dispatcher (
 where
 
 import Control.Monad
-import Data.IORef
-import Data.Word (Word32)
-import Foreign.Ptr (FunPtr, Ptr, freeHaskellFunPtr, nullPtr)
-import Foreign.StablePtr (castPtrToStablePtr, castStablePtrToPtr, deRefStablePtr, freeStablePtr, newStablePtr)
+import Foreign.StablePtr (castPtrToStablePtr, deRefStablePtr, freeStablePtr, newStablePtr)
 
 import Graphics.Wayland.Scanner.Marshal
 import Graphics.Wayland.Scanner.Types
 import Graphics.Wayland.Scanner.WLS
-import Graphics.Wayland.Server.Resource (Resource)
-import Graphics.Wayland.Util.Types (Argument, Message)
+import Graphics.Wayland.Server.Resource (Resource, resourceSetDispatcher)
+import Graphics.Wayland.Util.Types (Dispatcher)
 import Utility
 
 import Language.Haskell.TH qualified as TH
@@ -33,19 +30,7 @@ makeDispatchRecord naming requests = TH.dataD (pure []) naming.requestRecord [] 
  where
   bang = TH.Bang TH.NoSourceUnpackedness TH.SourceStrict
   makeField (request, args) =
-    TH.varBangType (naming.requestFieldOf request) $ TH.bangType (pure bang) (argsToIOType args)
-
-dispatcherType :: Scan TH.Type
-dispatcherType = [t|Ptr () -> Ptr Resource -> Word32 -> Ptr Message -> Ptr Argument -> IO ()|]
-
-makeDispatcherForeigns :: InterfaceNaming -> Scan [TH.Dec]
-makeDispatcherForeigns naming = do
-  forExport <- TH.ForeignD . TH.ExportF TH.CCall cName naming.dispatcher <$> dispatcherType
-  forImport <- TH.ForeignD . TH.ImportF TH.CCall TH.Safe ('&' : cName) naming.dispatcherPtr <$> importType
-  pure [forExport, forImport]
- where
-  cName = "s_" ++ naming.interfaceName ++ "Dispatcher"
-  importType = [t|FunPtr $dispatcherType|]
+    TH.varBangType (naming.requestFieldOf request) $ TH.bangType (pure bang) (argsToIOType args [t|()|])
 
 marshalNameOf :: (Show n) => n -> TH.Name
 marshalNameOf idx = TH.mkName ("marshal" ++ show idx)
@@ -54,25 +39,24 @@ dispatchExp :: InterfaceNaming -> TH.Name -> TH.Name -> TH.Name -> [String] -> S
 dispatchExp naming implPtr opcode args requests =
   TH.doE
     [ TH.bindS reqImplBinds [e|deRefStablePtr (castPtrToStablePtr $(TH.varE implPtr))|],
-      TH.noBindS $ TH.caseE (TH.varE opcode) $ zipWith matchFor requests [0 ..] <> [matchDef]
+      TH.noBindS $ TH.caseE (TH.varE opcode) $ zipWith matchFor requests [0 ..] <> [matchDefault]
     ]
  where
   reqImpl = TH.mkName "requestImpl"
   reqImplBinds = TH.sigP (TH.varP reqImpl) (TH.conT naming.requestRecord)
 
-  matchDef = TH.match TH.wildP (TH.normalB [e|pure ()|]) []
+  matchDefault = TH.match TH.wildP (TH.normalB [e|pure ()|]) []
   matchFor request index = TH.match (TH.litP $ TH.integerL index) (TH.normalB matchExp) []
    where
     matchExp = [e|$(TH.varE $ marshalNameOf index) $(TH.varE args) $ $(TH.varE field) $(TH.varE reqImpl)|]
     field = naming.requestFieldOf request
 
+-- Generates 'dispatch :: Ptr () -> Resource -> Word32 -> Message -> Ptr Argument -> IO ()'.
+-- Ptr () denotes the implementation.
 dispatchFnDec :: InterfaceNaming -> [(String, [ArgumentType])] -> Scan [TH.Dec]
 dispatchFnDec naming requests = do
   marshalDecs <- fmap undefined <$> zipWithM makeMarshaller (marshalNameOf <$> [0 :: Int ..]) (snd <$> requests)
-  sig <-
-    TH.sigD
-      naming.dispatcher
-      [t|Ptr () -> Ptr Resource -> Word32 -> Ptr Message -> Ptr Argument -> IO ()|]
+  sig <- TH.sigD naming.dispatcher [t|Dispatcher Resource|]
   fun <-
     TH.funD
       naming.dispatcher
@@ -80,33 +64,27 @@ dispatchFnDec naming requests = do
   pure [sig, fun]
  where
   funExp = dispatchExp naming implPtr opcode args (fst <$> requests)
-
   implPtr = TH.mkName "implPtr"
   opcode = TH.mkName "opcode"
   args = TH.mkName "args"
 
+-- Generates 'setDispatcher :: Resource -> {RequestRecord} -> (Resource -> IO ()) -> IO ()'
 setDispatchFnDec :: InterfaceNaming -> Scan [TH.Dec]
 setDispatchFnDec naming = do
-  sig <- TH.sigD setterName [t|Ptr Resource -> $(TH.conT naming.requestRecord) -> IO () -> IO ()|]
-  fun <- TH.funD setterName [TH.clause [TH.varP resource, TH.varP impl, TH.varP destroy] (TH.normalB bodyExpr) []]
+  sig <- TH.sigD setterName [t|Resource -> $(TH.conT naming.requestRecord) -> (Resource -> IO ()) -> IO ()|]
+  fun <- TH.funD setterName [TH.clause [TH.varP resource] (TH.normalB bodyExpr) []]
   pure [sig, fun]
  where
-  setterName = TH.mkName $ "set" ++ hsConstrName naming.interfaceName ++ "Dispatcher"
-  bodyExpr =
-    [e|
-      setResourceDispatcher $(TH.varE resource) $(TH.varE impl) $(TH.varE naming.dispatcherPtr) $(TH.varE destroy)
-      |]
+  setterName = TH.mkName . hsVarName $ "set_" ++ naming.interfaceName ++ "_dispatcher"
+  bodyExpr = [e|setDispatcherForResource $(TH.varE resource) $(TH.varE naming.dispatcher)|]
   resource = TH.mkName "resource"
-  impl = TH.mkName "impl"
-  destroy = TH.mkName "destroy"
 
 makeDispatcher :: String -> [(String, [ArgumentType])] -> Scan [TH.Dec]
 makeDispatcher interfaceName requests = do
   dataType <- makeDispatchRecord naming requests
   setters <- setDispatchFnDec naming
-  foreigns <- makeDispatcherForeigns naming
   dispatchers <- dispatchFnDec naming requests
-  pure $ dataType : setters ++ foreigns ++ dispatchers
+  pure $ dataType : setters ++ dispatchers
  where
   naming =
     InterfaceNaming
@@ -117,36 +95,9 @@ makeDispatcher interfaceName requests = do
         dispatcherPtr = TH.mkName . hsVarName $ interfaceName ++ "_dispatcher_ptr"
       }
 
-foreign import ccall unsafe "wl_resource_set_dispatcher"
-  c_set_dispatcher ::
-    Ptr Resource ->
-    FunPtr (Ptr () -> Ptr Resource -> Word32 -> Ptr Message -> Ptr Argument -> IO ()) ->
-    -- | Implementation
-    Ptr () ->
-    -- | Data
-    Ptr () ->
-    FunPtr (Ptr Resource -> IO ()) ->
-    IO ()
-
-foreign import ccall "wrapper" mkDestroyHandler :: (Ptr Resource -> IO ()) -> IO (FunPtr (Ptr Resource -> IO ()))
-
-setResourceDispatcher ::
-  Ptr Resource ->
-  a ->
-  FunPtr (Ptr () -> Ptr Resource -> Word32 -> Ptr Message -> Ptr Argument -> IO ()) ->
-  IO () ->
-  IO ()
-setResourceDispatcher resource handlers dispatcher destroy = do
-  sPtr <- newStablePtr handlers
-  ref <- newIORef undefined
-  destroyPointer <- mkDestroyHandler $ \_ -> do
-    freeStablePtr sPtr
-    freeHaskellFunPtr =<< readIORef ref
-    destroy
-  writeIORef ref destroyPointer
-  c_set_dispatcher
-    resource
-    dispatcher
-    (castStablePtrToPtr sPtr)
-    nullPtr
-    destroyPointer
+setDispatcherForResource :: Resource -> Dispatcher Resource -> a -> (Resource -> IO ()) -> IO ()
+setDispatcherForResource resource dispatcher handler onDestroy = do
+  handlerPtr <- newStablePtr handler
+  resourceSetDispatcher resource dispatcher handlerPtr $ \res -> do
+    freeStablePtr handlerPtr
+    onDestroy res

@@ -17,11 +17,17 @@ import Foreign.C.Types
 #include <wayland-server.h>
 {# context prefix="wl" #}
 
+withNullPtr :: (Ptr () -> IO a) -> IO a
+withNullPtr f = f nullPtr
+
 -- Why do I have to have this everywhere
 {# typedef uint32_t Word32 #}
 
 {# pointer *resource as Resource newtype #}
 {# pointer *client as Client newtype #}
+
+withResourceDispatcher :: Dispatcher Resource -> (FunPtr CDispatcher -> IO a) -> IO a
+withResourceDispatcher = withDispatcher Resource
 
 type DestroyCallback = Resource -> IO ()
 foreign import ccall unsafe "wrapper" makeDestroyCallback :: DestroyCallback -> IO (FunPtr DestroyCallback)
@@ -77,9 +83,9 @@ withDestroyCallback func act = do
 -- >         wl_resource_destroy_func_t destroy);
 {# fun unsafe resource_set_dispatcher as ^ {
     `Resource',
-    withDispatcher* `Dispatcher',
-    `Ptr ()',
-    `Ptr ()',
+    withResourceDispatcher* `Dispatcher Resource',
+    castStablePtrToPtr `StablePtr a',
+    withNullPtr- `Ptr ()',
     withDestroyCallback* `DestroyCallback'
   } -> `()' #}
 

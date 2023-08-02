@@ -4,7 +4,7 @@ module Graphics.Wayland.Util.Types (
   WlArray(..), WlArrayPtr,
   WlFixed,
   Argument(..), ArgumentPtr, ptrToArgument, argumentToPtr, wordToArgument, argumentToWord,
-  Dispatcher, withDispatcher,
+  Dispatcher, CDispatcher, withDispatcher,
 )
 where
 
@@ -86,11 +86,13 @@ argumentToWord (Argument arg) = fromIntegral arg
 --
 -- \return 0 on success, or -1 on failure
 --
-type Dispatcher = Ptr () -> Word32 -> Message -> Ptr Argument -> IO Int
+type Dispatcher target = Ptr () -> target -> Word32 -> Message -> Ptr Argument -> IO Int
 type CDispatcher = Ptr () -> Ptr () -> Word32 -> Message -> Ptr Argument -> IO CInt
 foreign import ccall unsafe "wrapper" makeDispatcher :: CDispatcher -> IO (FunPtr CDispatcher)
-withDispatcher :: Dispatcher -> (FunPtr CDispatcher -> IO a) -> IO a
-withDispatcher func act = do
-  fnPtr <- makeDispatcher $ \_ target opcode message argPtr ->
-    fromIntegral <$> func target opcode message argPtr
+withDispatcher :: (Ptr target -> target) -> Dispatcher target -> (FunPtr CDispatcher -> IO a) -> IO a
+withDispatcher wrap func act = do
+  fnPtr <- makeDispatcher $ \impl targetPtr opcode message argPtr ->
+    fromIntegral <$> func impl (wrap . castPtr $ targetPtr) opcode message argPtr
   act fnPtr
+
+-- TODO Maybe the dispatcher should be freed properly.
