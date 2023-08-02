@@ -20,76 +20,102 @@ import Utility
 
 import Language.Haskell.TH qualified as TH
 
-makeDispatchClause :: (TH.Name, [TH.Name]) -> [[ArgumentType]] -> Scan TH.Clause
-makeDispatchClause (dataTName, fs) xs = do
-  marshalDecs <- undefined <$> zipWithM makeMarshaller marshalNames xs
-  TH.clause [TH.varP implName, TH.wildP, TH.varP opName, TH.wildP, TH.varP argName] (TH.normalB funExp) (concat @[] marshalDecs)
+data InterfaceNaming = InterfaceNaming
+  { interfaceName :: String,
+    requestRecord :: TH.Name,
+    requestFieldOf :: String -> TH.Name,
+    dispatcher :: TH.Name,
+    dispatcherPtr :: TH.Name
+  }
+
+makeDispatchRecord :: InterfaceNaming -> [(String, [ArgumentType])] -> Scan TH.Dec
+makeDispatchRecord naming requests = TH.dataD (pure []) naming.requestRecord [] Nothing [TH.recC naming.requestRecord (makeField <$> requests)] []
  where
-  implName = TH.mkName "implPtr"
-  opName = TH.mkName "opcode"
-  argName = TH.mkName "wlArgs"
-  dataName = TH.mkName "takers"
-
-  makeMarshalName idx = TH.mkName ("marshal" ++ show idx)
-  marshalNames = take (length xs) $ fmap makeMarshalName [0 :: Int ..]
-
-  dataStmt = TH.bindS (TH.sigP (TH.varP dataName) (TH.conT dataTName)) [e|deRefStablePtr (castPtrToStablePtr $(TH.varE implName))|]
-  makeMatch field index =
-    let matchExp = TH.appE (TH.appE [e|$(TH.varE $ makeMarshalName index)|] (TH.varE argName)) (TH.appE (TH.varE field) (TH.varE dataName))
-     in TH.match (TH.litP (TH.IntegerL index)) (TH.normalB matchExp) []
-  failClause = TH.match TH.wildP (TH.normalB $ TH.appE (TH.varE 'pure) (TH.conE '())) []
-  clauses = zipWith makeMatch fs [0 ..] ++ [failClause]
-  funExp = TH.doE [dataStmt, TH.noBindS (TH.caseE (TH.varE opName) clauses)]
-
-makeDispatchRecord :: String -> [(String, [ArgumentType])] -> Scan TH.Dec
-makeDispatchRecord name xs = do
-  let dataName = TH.mkName $ cleanName name ++ "Requests"
-      bang = TH.Bang TH.NoSourceUnpackedness TH.SourceStrict
-      makeField (field, args) = do
-        tType <- undefined <$> takerType args
-        pure (TH.mkName (replaceUnder name ++ "Request" ++ cleanName field), bang, tType)
-  dataCon <- TH.RecC dataName <$> mapM makeField xs
-  pure $ TH.DataD [] dataName [] Nothing [dataCon] []
+  bang = TH.Bang TH.NoSourceUnpackedness TH.SourceStrict
+  makeField (request, args) =
+    TH.varBangType (naming.requestFieldOf request) $ TH.bangType (pure bang) (argsToIOType args)
 
 dispatcherType :: Scan TH.Type
-dispatcherType = [t|Ptr () -> Ptr Resource -> Word32 -> Ptr Message -> Ptr Argument|]
+dispatcherType = [t|Ptr () -> Ptr Resource -> Word32 -> Ptr Message -> Ptr Argument -> IO ()|]
 
-makeDispatcherForeigns :: String -> TH.Name -> Scan [TH.Dec]
-makeDispatcherForeigns str name = do
-  forExport <- TH.ForeignD . TH.ExportF TH.CCall cName name <$> dispatcherType
-  forImport <- TH.ForeignD . TH.ImportF TH.CCall TH.Safe ('&' : cName) importName <$> importType
+makeDispatcherForeigns :: InterfaceNaming -> Scan [TH.Dec]
+makeDispatcherForeigns naming = do
+  forExport <- TH.ForeignD . TH.ExportF TH.CCall cName naming.dispatcher <$> dispatcherType
+  forImport <- TH.ForeignD . TH.ImportF TH.CCall TH.Safe ('&' : cName) naming.dispatcherPtr <$> importType
   pure [forExport, forImport]
  where
-  cName = "s_" ++ str ++ "Dispatcher"
+  cName = "s_" ++ naming.interfaceName ++ "Dispatcher"
   importType = [t|FunPtr $dispatcherType|]
-  importName = TH.mkName $ str ++ "DispatcherPtr"
 
-makeSetterType :: TH.Name -> Scan TH.Type
-makeSetterType name = [t|Ptr Resource -> $(TH.conT name) -> IO () -> IO ()|]
+marshalNameOf :: (Show n) => n -> TH.Name
+marshalNameOf idx = TH.mkName ("marshal" ++ show idx)
 
-makeSetterBody :: TH.Name -> Scan TH.Clause
-makeSetterBody dispName =
-  let resName = TH.mkName "resource"
-      implName = TH.mkName "impl"
-      destroyName = TH.mkName "destroy"
-      body =
-        TH.normalB $
-          TH.appE (TH.appE (TH.appE [e|setResourceDispatcher $(TH.varE resName)|] (TH.varE implName)) (TH.varE dispName)) (TH.varE destroyName)
-   in TH.clause [TH.varP resName, TH.varP implName, TH.varP destroyName] body []
+dispatchExp :: InterfaceNaming -> TH.Name -> TH.Name -> TH.Name -> [String] -> Scan TH.Exp
+dispatchExp naming implPtr opcode args requests =
+  TH.doE
+    [ TH.bindS reqImplBinds [e|deRefStablePtr (castPtrToStablePtr $(TH.varE implPtr))|],
+      TH.noBindS $ TH.caseE (TH.varE opcode) $ zipWith matchFor requests [0 ..] <> [matchDef]
+    ]
+ where
+  reqImpl = TH.mkName "requestImpl"
+  reqImplBinds = TH.sigP (TH.varP reqImpl) (TH.conT naming.requestRecord)
+
+  matchDef = TH.match TH.wildP (TH.normalB [e|pure ()|]) []
+  matchFor request index = TH.match (TH.litP $ TH.integerL index) (TH.normalB matchExp) []
+   where
+    matchExp = [e|$(TH.varE $ marshalNameOf index) $(TH.varE args) $ $(TH.varE field) $(TH.varE reqImpl)|]
+    field = naming.requestFieldOf request
+
+dispatchFnDec :: InterfaceNaming -> [(String, [ArgumentType])] -> Scan [TH.Dec]
+dispatchFnDec naming requests = do
+  marshalDecs <- fmap undefined <$> zipWithM makeMarshaller (marshalNameOf <$> [0 :: Int ..]) (snd <$> requests)
+  sig <-
+    TH.sigD
+      naming.dispatcher
+      [t|Ptr () -> Ptr Resource -> Word32 -> Ptr Message -> Ptr Argument -> IO ()|]
+  fun <-
+    TH.funD
+      naming.dispatcher
+      [TH.clause [TH.varP implPtr, TH.wildP, TH.varP opcode, TH.wildP, TH.varP args] (TH.normalB funExp) (concat marshalDecs)]
+  pure [sig, fun]
+ where
+  funExp = dispatchExp naming implPtr opcode args (fst <$> requests)
+
+  implPtr = TH.mkName "implPtr"
+  opcode = TH.mkName "opcode"
+  args = TH.mkName "args"
+
+setDispatchFnDec :: InterfaceNaming -> Scan [TH.Dec]
+setDispatchFnDec naming = do
+  sig <- TH.sigD setterName [t|Ptr Resource -> $(TH.conT naming.requestRecord) -> IO () -> IO ()|]
+  fun <- TH.funD setterName [TH.clause [TH.varP resource, TH.varP impl, TH.varP destroy] (TH.normalB bodyExpr) []]
+  pure [sig, fun]
+ where
+  setterName = TH.mkName $ "set" ++ hsConstrName naming.interfaceName ++ "Dispatcher"
+  bodyExpr =
+    [e|
+      setResourceDispatcher $(TH.varE resource) $(TH.varE impl) $(TH.varE naming.dispatcherPtr) $(TH.varE destroy)
+      |]
+  resource = TH.mkName "resource"
+  impl = TH.mkName "impl"
+  destroy = TH.mkName "destroy"
 
 makeDispatcher :: String -> [(String, [ArgumentType])] -> Scan [TH.Dec]
-makeDispatcher name xs = do
-  dataType@(TH.DataD _ dataName [] Nothing [TH.RecC _ fs] []) <- makeDispatchRecord name xs
-  let clause = makeDispatchClause (dataName, map (\(n, _, _) -> n) fs) $ map snd xs
-  setterSig <- TH.sigD setterName (makeSetterType dataName)
-  setterFun <- TH.funD setterName [makeSetterBody $ TH.mkName $ name ++ "DispatcherPtr"]
-  foreigns <- makeDispatcherForeigns name dispName
-  dispatcherSig <- TH.sigD dispName dispatcherType
-  dispatcherFun <- TH.funD dispName [clause]
-  pure $ dataType : [setterSig, setterFun] ++ foreigns ++ [dispatcherSig, dispatcherFun]
+makeDispatcher interfaceName requests = do
+  dataType <- makeDispatchRecord naming requests
+  setters <- setDispatchFnDec naming
+  foreigns <- makeDispatcherForeigns naming
+  dispatchers <- dispatchFnDec naming requests
+  pure $ dataType : setters ++ foreigns ++ dispatchers
  where
-  dispName = TH.mkName $ name ++ "Dispatcher"
-  setterName = TH.mkName $ "set" ++ cleanName name ++ "Dispatcher"
+  naming =
+    InterfaceNaming
+      { interfaceName,
+        requestRecord = TH.mkName . hsConstrName $ interfaceName ++ "_requests",
+        requestFieldOf = \field -> TH.mkName . hsVarName $ interfaceName ++ "_" ++ field,
+        dispatcher = TH.mkName . hsVarName $ interfaceName ++ "_dispatcher",
+        dispatcherPtr = TH.mkName . hsVarName $ interfaceName ++ "_dispatcher_ptr"
+      }
 
 foreign import ccall unsafe "wl_resource_set_dispatcher"
   c_set_dispatcher ::

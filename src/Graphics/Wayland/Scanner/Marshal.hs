@@ -5,6 +5,7 @@ module Graphics.Wayland.Scanner.Marshal (
   postEventFnDec,
   makeMarshaller,
   takerType,
+  argsToIOType,
 ) where
 
 import Control.Monad

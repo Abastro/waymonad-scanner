@@ -27,13 +27,13 @@ makeInterfaceGetter iface = TH.forImpD TH.CCall TH.Safe ('&' : ifaceName) funNam
   importType = [t|Ptr Interface|]
 
 makeInterfaceDecls :: (String, Interface, Int) -> Scan [TH.Dec]
-makeInterfaceDecls (name, Interface _ reqs evts, _) = do
-  getterD <- makeInterfaceGetter name
+makeInterfaceDecls (interfaceName, Interface _ reqs evts, _) = do
+  getterD <- makeInterfaceGetter interfaceName
   reqD <-
     if null reqs
       then pure []
-      else makeDispatcher name $ map (\(n, Request x) -> (n, map snd x)) reqs
-  evtD <- traverse (\((n, Event x), i) -> postEventFnDec (TH.mkName $ replaceUnder name ++ "Post" ++ cleanName n) (map snd x) i) $ zip evts [0 ..]
+      else makeDispatcher interfaceName $ map (\(n, Request x) -> (n, map snd x)) reqs
+  evtD <- traverse (\((n, Event x), i) -> postEventFnDec (TH.mkName $ replaceUnder interfaceName ++ "Post" ++ cleanName n) (map snd x) i) $ zip evts [0 ..]
   pure $ getterD : reqD ++ concat evtD
 
 protocolFromFile :: String -> Scan [TH.Dec]
