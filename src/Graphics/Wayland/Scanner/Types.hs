@@ -1,33 +1,41 @@
-module Graphics.Wayland.Scanner.Types
+module Graphics.Wayland.Scanner.Types (
+  CanNull (..),
+  ArgumentType (..),
+  argTypeFromData,
+  WlEnum (..),
+  WlRequest (..),
+  WlEvent (..),
+  Interface (..),
+  WlProtocol (..),
+)
 where
 
+data CanNull = NonNull | Nullable
+  deriving (Show)
+
 data ArgumentType
-    = IntArg
-    | UIntArg
-    | FixedArg
-    | StringArg
-    | NullableStringArg
-    | ObjectArg String
-    | NullableObjectArg String
-    | NewIdArg String
-    | NullableNewIdArg String
-    | ArrayArg
-    | NullableArrayArg
-    | FdArg
-    deriving (Show)
+  = IntArg
+  | UIntArg
+  | FixedArg
+  | StringArg CanNull
+  | ObjectArg CanNull String
+  | NewIdArg CanNull String
+  | ArrayArg CanNull
+  | FdArg
+  deriving (Show)
 
 argTypeFromData :: String -> Bool -> Maybe String -> ArgumentType
 argTypeFromData "int" _ _ = IntArg
 argTypeFromData "uint" _ _ = UIntArg
 argTypeFromData "fixed" _ _ = FixedArg
-argTypeFromData "string" False _ = StringArg
-argTypeFromData "string" True _ = NullableStringArg
-argTypeFromData "object" False (Just s) = ObjectArg s
-argTypeFromData "object" True (Just s) = NullableObjectArg s
-argTypeFromData "new_id" False (Just s) = NewIdArg s
-argTypeFromData "new_id" True (Just s) = NullableNewIdArg s
-argTypeFromData "array" False _ = ArrayArg
-argTypeFromData "array" True _ = NullableArrayArg
+argTypeFromData "string" False _ = StringArg NonNull
+argTypeFromData "string" True _ = StringArg Nullable
+argTypeFromData "object" False (Just s) = ObjectArg NonNull s
+argTypeFromData "object" True (Just s) = ObjectArg Nullable s
+argTypeFromData "new_id" False (Just s) = NewIdArg NonNull s
+argTypeFromData "new_id" True (Just s) = NewIdArg Nullable s
+argTypeFromData "array" False _ = ArrayArg NonNull
+argTypeFromData "array" True _ = ArrayArg Nullable
 argTypeFromData "fd" _ _ = FdArg
 argTypeFromData x _ _ = error $ "Can't decode " ++ x ++ " as argument type"
 
